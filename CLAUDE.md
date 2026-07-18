@@ -9,6 +9,7 @@ Read this before writing any code or making any architectural decisions.
 A developer tool for experimenting with LLMs. Users enter a prompt, tune sampling parameters, and receive a response where each token is colour-highlighted by probability. Hovering a token shows the alternative tokens the model considered. A stats panel below the response shows token usage, request timing, context window consumption, and the raw JSON request.
 
 - **Full documentation:** `README.md`
+- **Phase status & roadmap:** `docs/PHASES.md`
 
 ---
 

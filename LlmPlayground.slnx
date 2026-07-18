@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LlmPlayground.API/LlmPlayground.API.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LlmPlayground.Tests/LlmPlayground.Tests.csproj" />
+  </Folder>
+</Solution>

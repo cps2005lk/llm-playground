@@ -49,7 +49,13 @@ public sealed class OllamaProvider : ILlmProvider
         var sw = Stopwatch.StartNew();
         var response = await client.SendAsync(httpRequest, cancellationToken);
         sw.Stop();
-        response.EnsureSuccessStatusCode();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            var errorMessage = TryExtractErrorMessage(errorBody) ?? errorBody;
+            throw new LlmProviderException((int)response.StatusCode, errorMessage);
+        }
 
         var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
         var doc = JsonNode.Parse(responseJson)!;
@@ -135,7 +141,13 @@ public sealed class OllamaProvider : ILlmProvider
         var sw = Stopwatch.StartNew();
         var response = await client.SendAsync(httpRequest, cancellationToken);
         sw.Stop();
-        response.EnsureSuccessStatusCode();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            var errorMessage = TryExtractErrorMessage(errorBody) ?? errorBody;
+            throw new LlmProviderException((int)response.StatusCode, errorMessage);
+        }
 
         var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
         var doc = JsonNode.Parse(responseJson)!;
@@ -205,4 +217,15 @@ public sealed class OllamaProvider : ILlmProvider
 
         return request;
     }
+
+    private static string? TryExtractErrorMessage(string json)
+    {
+        try { return JsonNode.Parse(json)?["error"]?.GetValue<string>(); }
+        catch { return null; }
+    }
+}
+
+public sealed class LlmProviderException(int statusCode, string message) : Exception(message)
+{
+    public int StatusCode { get; } = statusCode;
 }

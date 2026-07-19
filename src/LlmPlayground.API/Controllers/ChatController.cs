@@ -29,7 +29,15 @@ public sealed class ChatController : ControllerBase
 
         _logger.LogInformation("Chat request: model={Model} temp={Temp}", request.Model, request.Temperature);
 
-        var response = await _provider.GenerateAsync(request, cancellationToken);
-        return Ok(response);
+        try
+        {
+            var response = await _provider.GenerateAsync(request, cancellationToken);
+            return Ok(response);
+        }
+        catch (LlmProviderException ex)
+        {
+            _logger.LogWarning("Provider returned {StatusCode}: {Message}", ex.StatusCode, ex.Message);
+            return StatusCode(ex.StatusCode, new { error = ex.Message });
+        }
     }
 }

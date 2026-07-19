@@ -257,12 +257,24 @@ public sealed class OllamaProviderTests
     // ── GenerateAsync — HTTP ─────────────────────────────────────────────────
 
     [Test]
-    public void GenerateAsync_WhenHttpReturns500_ThrowsHttpRequestException()
+    public void GenerateAsync_WhenHttpReturns500_ThrowsLlmProviderException()
     {
         var provider = BuildProvider("{}", HttpStatusCode.InternalServerError);
 
-        Assert.ThrowsAsync<HttpRequestException>(() =>
+        Assert.ThrowsAsync<LlmProviderException>(() =>
             provider.GenerateAsync(DefaultRequest()));
+    }
+
+    [Test]
+    public void GenerateAsync_WhenHttpReturns403WithErrorBody_ExceptionMessageContainsProviderError()
+    {
+        var provider = BuildProvider("""{"error":"this model requires a subscription"}""", HttpStatusCode.Forbidden);
+
+        var ex = Assert.ThrowsAsync<LlmProviderException>(() =>
+            provider.GenerateAsync(DefaultRequest()));
+
+        Assert.That(ex!.Message, Does.Contain("subscription"));
+        Assert.That(ex!.StatusCode, Is.EqualTo(403));
     }
 
     [Test]

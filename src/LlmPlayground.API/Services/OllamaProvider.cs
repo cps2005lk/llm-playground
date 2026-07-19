@@ -22,23 +22,40 @@ public sealed class OllamaProvider : ILlmProvider
 
     public async Task<ChatResponse> GenerateAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
-        var body = new
+        string json;
+        if (_settings.IsLocal)
         {
-            model = request.Model,
-            messages = new[]
+            // Local Ollama accepts the options wrapper and logprobs
+            var body = new
             {
-                new { role = "user", content = request.Prompt }
-            },
-            temperature = request.Temperature,
-            max_tokens = request.MaxTokens,
-            top_p = request.TopP,
-            options = new { top_k = request.TopK },
-            logprobs = true,
-            top_logprobs = request.TopLogprobs,
-            stream = false
-        };
-
-        var json = JsonSerializer.Serialize(body);
+                model = request.Model,
+                messages = new[] { new { role = "user", content = request.Prompt } },
+                temperature = request.Temperature,
+                max_tokens = request.MaxTokens,
+                top_p = request.TopP,
+                options = new { top_k = request.TopK },
+                logprobs = true,
+                top_logprobs = request.TopLogprobs,
+                stream = false
+            };
+            json = JsonSerializer.Serialize(body);
+        }
+        else
+        {
+            // Cloud uses the standard OpenAI schema — no options wrapper, logprobs optional
+            var body = new
+            {
+                model = request.Model,
+                messages = new[] { new { role = "user", content = request.Prompt } },
+                temperature = request.Temperature,
+                max_tokens = request.MaxTokens,
+                top_p = request.TopP,
+                logprobs = true,
+                top_logprobs = request.TopLogprobs,
+                stream = false
+            };
+            json = JsonSerializer.Serialize(body);
+        }
         var httpRequest = BuildRequest(HttpMethod.Post, "/v1/chat/completions", new StringContent(json, Encoding.UTF8, "application/json"));
 
         var client = _httpClientFactory.CreateClient("ollama");

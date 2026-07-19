@@ -1,4 +1,4 @@
-namespace LlmPlayground.API.Models;
+ namespace LlmPlayground.API.Models;
 
 public sealed record ModelInfo
 {

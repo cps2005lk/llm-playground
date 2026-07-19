@@ -20,42 +20,29 @@ public sealed class OllamaProvider : ILlmProvider
         _logger = logger;
     }
 
-    public async Task<ChatResponse> GenerateAsync(ChatRequest request, CancellationToken cancellationToken = default)
+    public Task<ChatResponse> GenerateAsync(ChatRequest request, CancellationToken cancellationToken = default) =>
+        _settings.IsLocal
+            ? GenerateLocalAsync(request, cancellationToken)
+            : GenerateCloudAsync(request, cancellationToken);
+
+    // ── Local: OpenAI-compatible /v1/chat/completions with logprobs ──────────
+
+    private async Task<ChatResponse> GenerateLocalAsync(ChatRequest request, CancellationToken cancellationToken)
     {
-        string json;
-        if (_settings.IsLocal)
+        var body = new
         {
-            // Local Ollama accepts the options wrapper and logprobs
-            var body = new
-            {
-                model = request.Model,
-                messages = new[] { new { role = "user", content = request.Prompt } },
-                temperature = request.Temperature,
-                max_tokens = request.MaxTokens,
-                top_p = request.TopP,
-                options = new { top_k = request.TopK },
-                logprobs = true,
-                top_logprobs = request.TopLogprobs,
-                stream = false
-            };
-            json = JsonSerializer.Serialize(body);
-        }
-        else
-        {
-            // Cloud uses the standard OpenAI schema — no options wrapper, logprobs optional
-            var body = new
-            {
-                model = request.Model,
-                messages = new[] { new { role = "user", content = request.Prompt } },
-                temperature = request.Temperature,
-                max_tokens = request.MaxTokens,
-                top_p = request.TopP,
-                logprobs = true,
-                top_logprobs = request.TopLogprobs,
-                stream = false
-            };
-            json = JsonSerializer.Serialize(body);
-        }
+            model = request.Model,
+            messages = new[] { new { role = "user", content = request.Prompt } },
+            temperature = request.Temperature,
+            max_tokens = request.MaxTokens,
+            top_p = request.TopP,
+            options = new { top_k = request.TopK },
+            logprobs = true,
+            top_logprobs = request.TopLogprobs,
+            stream = false
+        };
+
+        var json = JsonSerializer.Serialize(body);
         var httpRequest = BuildRequest(HttpMethod.Post, "/v1/chat/completions", new StringContent(json, Encoding.UTF8, "application/json"));
 
         var client = _httpClientFactory.CreateClient("ollama");
@@ -73,17 +60,15 @@ public sealed class OllamaProvider : ILlmProvider
         var usageNode = doc["usage"];
         var inputTokens = usageNode?["prompt_tokens"]?.GetValue<int>() ?? 0;
         var outputTokens = usageNode?["completion_tokens"]?.GetValue<int>() ?? 0;
-        var totalTokens = usageNode?["total_tokens"]?.GetValue<int>() ?? 0;
         var durationMs = sw.Elapsed.TotalMilliseconds;
-        var tokensPerSecond = durationMs > 0 ? Math.Round(outputTokens / (durationMs / 1000.0), 1) : 0;
 
         var usage = new UsageStats
         {
             InputTokens = inputTokens,
             OutputTokens = outputTokens,
-            TotalTokens = totalTokens,
+            TotalTokens = usageNode?["total_tokens"]?.GetValue<int>() ?? 0,
             DurationMs = Math.Round(durationMs, 0),
-            TokensPerSecond = tokensPerSecond
+            TokensPerSecond = durationMs > 0 ? Math.Round(outputTokens / (durationMs / 1000.0), 1) : 0
         };
 
         var logprobsNode = choice?["logprobs"]?["content"];
@@ -127,25 +112,76 @@ public sealed class OllamaProvider : ILlmProvider
             });
         }
 
-        return new ChatResponse
-        {
-            Text = text,
-            LogprobsAvailable = true,
-            Tokens = tokens,
-            Usage = usage
-        };
+        return new ChatResponse { Text = text, LogprobsAvailable = true, Tokens = tokens, Usage = usage };
     }
+
+    // ── Cloud: native Ollama /api/generate ───────────────────────────────────
+    // Response shape: { response, prompt_eval_count, eval_count, eval_duration (ns) }
+    // Logprobs are not available via this endpoint.
+
+    private async Task<ChatResponse> GenerateCloudAsync(ChatRequest request, CancellationToken cancellationToken)
+    {
+        var body = new
+        {
+            model = request.Model,
+            prompt = request.Prompt,
+            stream = false
+        };
+
+        var json = JsonSerializer.Serialize(body);
+        var httpRequest = BuildRequest(HttpMethod.Post, "/api/generate", new StringContent(json, Encoding.UTF8, "application/json"));
+
+        var client = _httpClientFactory.CreateClient("ollama");
+        var sw = Stopwatch.StartNew();
+        var response = await client.SendAsync(httpRequest, cancellationToken);
+        sw.Stop();
+        response.EnsureSuccessStatusCode();
+
+        var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+        var doc = JsonNode.Parse(responseJson)!;
+
+        var text = doc["response"]?.GetValue<string>() ?? string.Empty;
+        var inputTokens = doc["prompt_eval_count"]?.GetValue<int>() ?? 0;
+        var outputTokens = doc["eval_count"]?.GetValue<int>() ?? 0;
+        var durationMs = sw.Elapsed.TotalMilliseconds;
+
+        var usage = new UsageStats
+        {
+            InputTokens = inputTokens,
+            OutputTokens = outputTokens,
+            TotalTokens = inputTokens + outputTokens,
+            DurationMs = Math.Round(durationMs, 0),
+            TokensPerSecond = durationMs > 0 ? Math.Round(outputTokens / (durationMs / 1000.0), 1) : 0
+        };
+
+        return new ChatResponse { Text = text, LogprobsAvailable = false, Usage = usage };
+    }
+
+    // ── Models ───────────────────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<ModelInfo>> GetModelsAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             var client = _httpClientFactory.CreateClient("ollama");
+            var request = BuildRequest(HttpMethod.Get, "/api/tags");
+            var response = await client.SendAsync(request, cancellationToken);
+            response.EnsureSuccessStatusCode();
 
-            // Local Ollama exposes /api/tags; cloud uses the OpenAI-compatible /v1/models
-            return _settings.IsLocal
-                ? await GetModelsFromTagsAsync(client, cancellationToken)
-                : await GetModelsFromOpenAiAsync(client, cancellationToken);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            var doc = JsonNode.Parse(json)!;
+
+            return doc["models"]?.AsArray()
+                .Where(m => m is not null)
+                .Select(m => new ModelInfo
+                {
+                    Name = m!["name"]?.GetValue<string>() ?? string.Empty,
+                    ContextLength = m["details"]?["context_length"]?.GetValue<long>() ?? 0,
+                    SizeBytes = m["size"]?.GetValue<long>() ?? 0
+                })
+                .Where(m => !string.IsNullOrEmpty(m.Name))
+                .ToList()
+                ?? [];
         }
         catch (Exception ex)
         {
@@ -154,49 +190,7 @@ public sealed class OllamaProvider : ILlmProvider
         }
     }
 
-    private async Task<IReadOnlyList<ModelInfo>> GetModelsFromTagsAsync(HttpClient client, CancellationToken cancellationToken)
-    {
-        var request = BuildRequest(HttpMethod.Get, "/api/tags");
-        var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var doc = JsonNode.Parse(json)!;
-
-        return doc["models"]?.AsArray()
-            .Where(m => m is not null)
-            .Select(m => new ModelInfo
-            {
-                Name = m!["name"]?.GetValue<string>() ?? string.Empty,
-                ContextLength = m["details"]?["context_length"]?.GetValue<long>() ?? 0,
-                SizeBytes = m["size"]?.GetValue<long>() ?? 0
-            })
-            .Where(m => !string.IsNullOrEmpty(m.Name))
-            .ToList()
-            ?? [];
-    }
-
-    private async Task<IReadOnlyList<ModelInfo>> GetModelsFromOpenAiAsync(HttpClient client, CancellationToken cancellationToken)
-    {
-        var request = BuildRequest(HttpMethod.Get, "/v1/models");
-        var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var doc = JsonNode.Parse(json)!;
-
-        return doc["data"]?.AsArray()
-            .Where(m => m is not null)
-            .Select(m => new ModelInfo
-            {
-                Name = m!["id"]?.GetValue<string>() ?? string.Empty,
-                ContextLength = 0,
-                SizeBytes = 0
-            })
-            .Where(m => !string.IsNullOrEmpty(m.Name))
-            .ToList()
-            ?? [];
-    }
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path, HttpContent? content = null)
     {

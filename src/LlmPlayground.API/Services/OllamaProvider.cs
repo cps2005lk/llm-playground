@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,12 +9,14 @@ namespace LlmPlayground.API.Services;
 
 public sealed class OllamaProvider : ILlmProvider
 {
-    private readonly HttpClient _http;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly LlmProviderSettings _settings;
     private readonly ILogger<OllamaProvider> _logger;
 
-    public OllamaProvider(HttpClient http, ILogger<OllamaProvider> logger)
+    public OllamaProvider(IHttpClientFactory httpClientFactory, LlmProviderSettings settings, ILogger<OllamaProvider> logger)
     {
-        _http = http;
+        _httpClientFactory = httpClientFactory;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -36,10 +39,11 @@ public sealed class OllamaProvider : ILlmProvider
         };
 
         var json = JsonSerializer.Serialize(body);
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        var httpRequest = BuildRequest(HttpMethod.Post, "/v1/chat/completions", new StringContent(json, Encoding.UTF8, "application/json"));
 
+        var client = _httpClientFactory.CreateClient("ollama");
         var sw = Stopwatch.StartNew();
-        var response = await _http.PostAsync("/v1/chat/completions", content, cancellationToken);
+        var response = await client.SendAsync(httpRequest, cancellationToken);
         sw.Stop();
         response.EnsureSuccessStatusCode();
 
@@ -49,7 +53,6 @@ public sealed class OllamaProvider : ILlmProvider
         var choice = doc["choices"]?[0];
         var text = choice?["message"]?["content"]?.GetValue<string>() ?? string.Empty;
 
-        // Usage stats
         var usageNode = doc["usage"];
         var inputTokens = usageNode?["prompt_tokens"]?.GetValue<int>() ?? 0;
         var outputTokens = usageNode?["completion_tokens"]?.GetValue<int>() ?? 0;
@@ -66,7 +69,6 @@ public sealed class OllamaProvider : ILlmProvider
             TokensPerSecond = tokensPerSecond
         };
 
-        // Logprobs
         var logprobsNode = choice?["logprobs"]?["content"];
         if (logprobsNode is null)
         {
@@ -121,28 +123,75 @@ public sealed class OllamaProvider : ILlmProvider
     {
         try
         {
-            var response = await _http.GetAsync("/api/tags", cancellationToken);
-            response.EnsureSuccessStatusCode();
+            var client = _httpClientFactory.CreateClient("ollama");
 
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-            var doc = JsonNode.Parse(json)!;
-
-            return doc["models"]?.AsArray()
-                .Where(m => m is not null)
-                .Select(m => new ModelInfo
-                {
-                    Name = m!["name"]?.GetValue<string>() ?? string.Empty,
-                    ContextLength = m["details"]?["context_length"]?.GetValue<long>() ?? 0,
-                    SizeBytes = m["size"]?.GetValue<long>() ?? 0
-                })
-                .Where(m => !string.IsNullOrEmpty(m.Name))
-                .ToList()
-                ?? [];
+            // Local Ollama exposes /api/tags; cloud uses the OpenAI-compatible /v1/models
+            return _settings.IsLocal
+                ? await GetModelsFromTagsAsync(client, cancellationToken)
+                : await GetModelsFromOpenAiAsync(client, cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to fetch models from Ollama");
+            _logger.LogError(ex, "Failed to fetch models from Ollama ({BaseUrl})", _settings.BaseUrl);
             return [];
         }
+    }
+
+    private async Task<IReadOnlyList<ModelInfo>> GetModelsFromTagsAsync(HttpClient client, CancellationToken cancellationToken)
+    {
+        var request = BuildRequest(HttpMethod.Get, "/api/tags");
+        var response = await client.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        var doc = JsonNode.Parse(json)!;
+
+        return doc["models"]?.AsArray()
+            .Where(m => m is not null)
+            .Select(m => new ModelInfo
+            {
+                Name = m!["name"]?.GetValue<string>() ?? string.Empty,
+                ContextLength = m["details"]?["context_length"]?.GetValue<long>() ?? 0,
+                SizeBytes = m["size"]?.GetValue<long>() ?? 0
+            })
+            .Where(m => !string.IsNullOrEmpty(m.Name))
+            .ToList()
+            ?? [];
+    }
+
+    private async Task<IReadOnlyList<ModelInfo>> GetModelsFromOpenAiAsync(HttpClient client, CancellationToken cancellationToken)
+    {
+        var request = BuildRequest(HttpMethod.Get, "/v1/models");
+        var response = await client.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        var doc = JsonNode.Parse(json)!;
+
+        return doc["data"]?.AsArray()
+            .Where(m => m is not null)
+            .Select(m => new ModelInfo
+            {
+                Name = m!["id"]?.GetValue<string>() ?? string.Empty,
+                ContextLength = 0,
+                SizeBytes = 0
+            })
+            .Where(m => !string.IsNullOrEmpty(m.Name))
+            .ToList()
+            ?? [];
+    }
+
+    private HttpRequestMessage BuildRequest(HttpMethod method, string path, HttpContent? content = null)
+    {
+        var baseUrl = _settings.BaseUrl.TrimEnd('/');
+        var request = new HttpRequestMessage(method, $"{baseUrl}{path}");
+
+        if (!string.IsNullOrEmpty(_settings.ApiKey))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.ApiKey);
+
+        if (content is not null)
+            request.Content = content;
+
+        return request;
     }
 }

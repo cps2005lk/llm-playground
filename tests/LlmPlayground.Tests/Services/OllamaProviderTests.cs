@@ -31,6 +31,14 @@ internal sealed class MockHttpHandler : HttpMessageHandler
     }
 }
 
+internal sealed class MockHttpClientFactory : IHttpClientFactory
+{
+    private readonly HttpClient _client;
+    public MockHttpClientFactory(HttpMessageHandler handler) =>
+        _client = new HttpClient(handler);
+    public HttpClient CreateClient(string name) => _client;
+}
+
 [TestFixture]
 public sealed class OllamaProviderTests
 {
@@ -39,8 +47,9 @@ public sealed class OllamaProviderTests
     private static OllamaProvider BuildProvider(string responseJson, HttpStatusCode status = HttpStatusCode.OK)
     {
         var handler = new MockHttpHandler(responseJson, status);
-        var http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:11434") };
-        return new OllamaProvider(http, NullLogger<OllamaProvider>.Instance);
+        var factory = new MockHttpClientFactory(handler);
+        var settings = new LlmProviderSettings { BaseUrl = "http://localhost:11434" };
+        return new OllamaProvider(factory, settings, NullLogger<OllamaProvider>.Instance);
     }
 
     private static string ChatJson(
@@ -260,8 +269,9 @@ public sealed class OllamaProviderTests
     public async Task GenerateAsync_SendsRequestToCorrectEndpoint()
     {
         var handler = new MockHttpHandler(ChatJson("ok"));
-        var http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:11434") };
-        var provider = new OllamaProvider(http, NullLogger<OllamaProvider>.Instance);
+        var provider = new OllamaProvider(new MockHttpClientFactory(handler),
+            new LlmProviderSettings { BaseUrl = "http://localhost:11434" },
+            NullLogger<OllamaProvider>.Instance);
 
         await provider.GenerateAsync(DefaultRequest());
 
@@ -272,8 +282,9 @@ public sealed class OllamaProviderTests
     public async Task GenerateAsync_SendsPostRequest()
     {
         var handler = new MockHttpHandler(ChatJson("ok"));
-        var http = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:11434") };
-        var provider = new OllamaProvider(http, NullLogger<OllamaProvider>.Instance);
+        var provider = new OllamaProvider(new MockHttpClientFactory(handler),
+            new LlmProviderSettings { BaseUrl = "http://localhost:11434" },
+            NullLogger<OllamaProvider>.Instance);
 
         await provider.GenerateAsync(DefaultRequest());
 

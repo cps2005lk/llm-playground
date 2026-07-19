@@ -17,13 +17,21 @@ try
     builder.Services.AddControllers();
     builder.Services.AddOpenApi();
 
-    // LLM provider — Ollama via its OpenAI-compatible endpoint
-    var ollamaBaseUrl = builder.Configuration["LlmProvider:BaseUrl"] ?? "http://localhost:11434";
-    builder.Services.AddHttpClient<ILlmProvider, OllamaProvider>(client =>
+    // Provider settings — mutable singleton so they can be changed at runtime via the API
+    var providerSettings = new LlmProviderSettings
     {
-        client.BaseAddress = new Uri(ollamaBaseUrl);
+        BaseUrl = (builder.Configuration["LlmProvider:BaseUrl"] ?? "http://localhost:11434").TrimEnd('/'),
+        ApiKey = builder.Configuration["LlmProvider:ApiKey"] ?? string.Empty
+    };
+    builder.Services.AddSingleton(providerSettings);
+
+    // Named HttpClient with no pre-set base address; OllamaProvider builds absolute URLs at call time
+    builder.Services.AddHttpClient("ollama", client =>
+    {
         client.Timeout = TimeSpan.FromSeconds(120);
     });
+
+    builder.Services.AddScoped<ILlmProvider, OllamaProvider>();
 
     builder.Services.AddCors(options =>
     {
